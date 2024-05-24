@@ -55,7 +55,7 @@ func New(fileName, tableName string) (*DB, error) {
 	}, nil
 }
 
-func (db *DB) Insert() error {
+func InsertItems[T any](db *DB, items ...Item[T]) error {
 	return nil
 }
 
