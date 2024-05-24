@@ -1,7 +1,11 @@
 package lightdb
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"time"
 )
@@ -12,36 +16,48 @@ type (
 		tableName string
 	}
 
-	Item[T any] struct {
+	Ownership struct {
+		OwnerID   int64
+		Ownership string
+	}
+)
+
+type (
+	itemModel struct {
 		ID        int64
 		CreatedAt time.Time
 		UpdatedAt time.Time
 		DeletedAt time.Time
-		Data      *T
+		Data      []byte
 		Type      string
 		OwnerID   int64
 		Ownership string
 	}
 
-	ItemValue[T any] struct {
+	itemValueModel struct {
 		ID        int64
 		Field     string
-		Value     T
+		Value     any // TODO
 		ItemType  string
 		ItemID    int64
 		IsIndexed bool
 		IsUnique  bool
 	}
 
-	ItemRelationship[T any] struct {
+	itemRelationshipModel struct {
 		ID        int64
 		Name      string
 		OwnerType string
 		OwnerID   int64
 		ItemType  string
 		ItemID    int64
-		Data      *T
+		Data      []byte
 	}
+)
+
+var (
+	ErrInvalidItem = errors.New("invalid item: it should be a pointer to struct")
+	ErrMarshalling = errors.New("invalid item: JSON marshalling failed")
 )
 
 func New(fileName, tableName string) (*DB, error) {
@@ -55,37 +71,72 @@ func New(fileName, tableName string) (*DB, error) {
 	}, nil
 }
 
-func InsertItems[T any](db *DB, items ...Item[T]) error {
-	return nil
+func (db *DB) Insert(typ string, data any, ownership ...Ownership) (int64, error) {
+	return db.InsertCtx(context.Background(), typ, data, ownership...)
 }
 
-func isValidEntity(e any) bool {
-	zero := reflect.Value{}
-	elem := reflect.ValueOf(e).Elem()
-	timeType := reflect.TypeOf(time.Time{})
+func (db *DB) InsertCtx(
+	ctx context.Context,
+	typ string,
+	data any,
+	ownership ...Ownership,
+) (int64, error) {
+	if isStruct(data) {
+		return -1, ErrInvalidItem
+	}
 
-	id := elem.FieldByName("ID")
-	createdAt := elem.FieldByName("CreatedAt")
-	updatedAt := elem.FieldByName("UpdateAt")
-	deletedAt := elem.FieldByName("DeletedAt")
-	data := elem.FieldByName("Data")
-	typeField := elem.FieldByName("Type")
-	ownerID := elem.FieldByName("OwnerID")
-	ownership := elem.FieldByName("Ownership")
+	bs, err := json.Marshal(data)
+	if err != nil {
+		return -1, ErrMarshalling
+	}
 
-	return id != zero &&
-		id.Kind() == reflect.Int64 &&
-		createdAt != zero &&
-		createdAt.Type() == timeType &&
-		updatedAt != zero &&
-		updatedAt.Type() == timeType &&
-		deletedAt != zero &&
-		deletedAt.Type() == timeType &&
-		data != zero &&
-		typeField != zero &&
-		typeField.Kind() != reflect.String &&
-		ownerID != zero &&
-		ownerID.Kind() == reflect.Int64 &&
-		ownership != zero &&
-		ownership.Kind() == reflect.String
+	var res sql.Result
+	if len(ownership) > 0 {
+		res, err = db.insertWithOwnershipQ(ctx, typ, bs, ownership[0])
+	} else {
+		res, err = db.insertQ(ctx, typ, bs)
+	}
+
+	if err != nil {
+		return -1, err
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return -1, err
+	}
+	return id, nil
+}
+
+func (db *DB) insertQ(ctx context.Context, typ string, data []byte) (sql.Result, error) {
+	now := time.Now()
+	q := fmt.Sprintf(`
+		INSERT INTO %v (created_at, updated_at, type, data)
+		VALUES (?, ?, ?, ?);`,
+		db.tableName,
+	)
+	return db.conn.ExecContext(ctx, q, now, now, typ, data)
+}
+
+func (db *DB) insertWithOwnershipQ(
+	ctx context.Context,
+	typ string,
+	data []byte,
+	o Ownership,
+) (sql.Result, error) {
+	now := time.Now()
+	q := fmt.Sprintf(`
+		INSERT INTO %v (created_at, updated_at, type, data, owner_id, ownership)
+		VALUES (?, ?, ?, ?);`,
+		db.tableName,
+	)
+	return db.conn.ExecContext(ctx, q, now, now, typ, data, o.OwnerID, o.Ownership)
+}
+
+func isStruct(x any) bool {
+	v := reflect.ValueOf(x)
+	if v.Kind() == reflect.Ptr {
+		return false
+	}
+	return v.Elem().Kind() == reflect.Struct
 }
